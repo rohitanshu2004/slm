@@ -1,0 +1,29 @@
+financial-rag-limited/
+├── backend/
+│   ├── main.py                    # FastAPI app
+│   ├── file_processors/
+│   │   ├── __init__.py
+│   │   ├── pdf_processor.py
+│   │   ├── excel_processor.py
+│   │   └── csv_processor.py
+│   ├── services/
+│   │   ├── embedding_service.py
+│   │   ├── vector_store.py
+│   │   └── rag_service.py
+│   ├── models/
+│   │   └── schemas.py
+│   └── utils/
+│       ├── chunking.py
+│       └── text_cleaner.py
+├── frontend/
+│   └── app.py                    # Streamlit UI
+├── config.py                     # Configuration
+└── requirements.txt
+
+
+
+Microsoft Phi-2 (2.7B) - Good balance of performance/size
+
+TinyLlama-1.1B - Very fast, decent performance
+
+Qwen1.5-1.8B - Strong multilingual support
