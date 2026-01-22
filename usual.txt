@@ -27,3 +27,10 @@ Microsoft Phi-2 (2.7B) - Good balance of performance/size
 TinyLlama-1.1B - Very fast, decent performance
 
 Qwen1.5-1.8B - Strong multilingual support
+
+
+
+
+
+###### transformer path 
+C:\Users\ASUS\.cache\huggingface\hub\.locks\models--microsoft--phi-2\011968cc02a5cca9fd46ecd994fc961e6906c0bd.lock
