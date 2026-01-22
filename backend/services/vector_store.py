@@ -85,7 +85,8 @@ class VectorStore:
     def get_collection_info(self):
         """Get information about the collection."""
         try:
-            document_count = len(self.vector_store.docstore)
+            # Use index_to_docstore_id mapping to get document count
+            document_count = len(self.vector_store.index_to_docstore_id)
             return {
                 "collection_name": self.collection_name,
                 "document_count": document_count,

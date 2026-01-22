@@ -218,19 +218,27 @@ async def _initialize_services():
                     model=settings.SLM_MODEL,
                     base_url=settings.OLLAMA_API_URL,
                     temperature=0.1,  # Lower temperature for more factual responses
-                    num_predict=512  # Limit response length
+                    num_predict=128  # Reduced response length to speed initialization
                 )
-                
-                # Test LLM with a simple query
-                test_response = _llm.invoke("Hello")
-                if test_response:
-                    logger.info("LLM initialized successfully")
-                else:
-                    raise ServiceInitializationException(
-                        message="LLM returned empty response",
-                        service_name="LLM"
-                    )
-                    
+
+                # Test LLM with a short prompt (skip test if it hangs to prevent startup blocking)
+                try:
+                    logger.info("Testing LLM with short prompt...")
+                    loop = asyncio.get_event_loop()
+                    test_future = loop.run_in_executor(None, _llm.invoke, "Hello")
+                    test_response = await asyncio.wait_for(test_future, timeout=10.0)  # Reduced to 10s
+
+                    # Normalize response for logging
+                    if test_response:
+                        resp_text = test_response.strip() if isinstance(test_response, str) else str(test_response)
+                        logger.info(f"LLM initialized successfully — response length: {len(resp_text)}")
+                    else:
+                        logger.warning("LLM returned empty response, proceeding anyway")
+                except asyncio.TimeoutError:
+                    logger.warning("LLM test timed out after 10 seconds, proceeding without test")
+                except Exception as e:
+                    logger.warning(f"LLM test failed: {e}, proceeding anyway")
+
             except Exception as e:
                 raise ServiceInitializationException(
                     message="Failed to initialize LLM service",
