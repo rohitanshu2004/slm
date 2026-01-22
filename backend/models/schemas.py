@@ -36,7 +36,7 @@ class QueryResponse(BaseModel):
 
 class HealthCheck(BaseModel):
     status: str
-    model_loaded: bool
+    is_model_loader: bool
     vector_db_ready: bool
     total_documents: int
 

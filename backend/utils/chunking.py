@@ -1,6 +1,6 @@
 from typing import List, Dict, Any
 import re
-from ..config import settings
+from config import settings
 
 class TextChunker:
     def __init__(self, chunk_size: int = 500, chunk_overlap: int = 50):

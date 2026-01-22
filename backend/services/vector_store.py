@@ -1,154 +1,100 @@
-from ..config import settings
-from typing import List, Dict, Any, Optional
-import uuid
-import logging
+from langchain_community.vectorstores.faiss import FAISS
+from langchain_ollama import OllamaEmbeddings
+from langchain.schema import Document
+from config import settings
 import os
-import pickle
+import logging
 
 logger = logging.getLogger(__name__)
 
 class VectorStore:
-    def __init__(self, collection_name: str, embedding_service, persist_directory: str = "./data/vector_db"):
+    def __init__(self, collection_name: str, persist_directory: str = "./data/vector_db"):
         self.collection_name = collection_name
-        self.embedding_service = embedding_service
         self.persist_directory = persist_directory
-        self.index_file = os.path.join(persist_directory, f"{collection_name}_index.pkl")
-        self.documents_file = os.path.join(persist_directory, f"{collection_name}_documents.pkl")
+        self.index_path = os.path.join(persist_directory, collection_name)
 
-        # Ensure directory exists
-        os.makedirs(persist_directory, exist_ok=True)
+        # Initialize embeddings
+        self.embeddings = OllamaEmbeddings(
+            model=settings.EMBEDDING_MODEL,
+            base_url=settings.OLLAMA_API_URL
+        )
 
-        # Initialize FAISS index and document store
-        self.index = None
-        self.documents = []
-        self.metadata = []
+        # Load or create FAISS index
+        if os.path.exists(self.index_path):
+            self.vector_store = FAISS.load_local(self.index_path, self.embeddings)
+            logger.info(f"Loaded existing FAISS index for collection: {collection_name}")
+        else:
+            # Dummy document to bootstrap FAISS
+            dummy_doc = Document(page_content="init")
+            self.vector_store = FAISS.from_documents([dummy_doc], self.embeddings)
+            # Remove dummy entry
+            self.vector_store.index.reset()
+            self.vector_store.docstore._dict.clear()
+            logger.info(f"Created new FAISS index for collection: {collection_name}")
 
-        # Load existing data if available
-        self._load_index()
+    def as_retriever(self, search_kwargs=None):
+        """
+        Expose LangChain retriever interface
+        """
+        return self.vector_store.as_retriever(
+            search_kwargs=search_kwargs or {"k": 4}
+        )
 
-        logger.info(f"Vector store initialized. Collection: {collection_name}")
 
-    def _load_index(self):
-        """Load existing FAISS index and documents"""
+    def add_documents(self, texts: list, metadatas: list):
+        """Add documents to the vector store."""
         try:
-            import faiss
-            if os.path.exists(self.index_file) and os.path.exists(self.documents_file):
-                # Load FAISS index
-                self.index = faiss.read_index(self.index_file)
-
-                # Load documents and metadata
-                with open(self.documents_file, 'rb') as f:
-                    data = pickle.load(f)
-                    self.documents = data['documents']
-                    self.metadata = data['metadata']
-
-                logger.info(f"Loaded existing index with {len(self.documents)} documents")
-            else:
-                # Create new index
-                dimension = len(self.embedding_service.get_embeddings(["test"])[0])
-                self.index = faiss.IndexFlatIP(dimension)  # Inner product for cosine similarity
-                logger.info("Created new FAISS index")
+            self.vector_store.add_texts(texts, metadatas)
+            self.vector_store.save_local(self.index_path)
+            logger.info(f"Added {len(texts)} documents to the vector store.")
         except Exception as e:
-            logger.error(f"Failed to load FAISS index: {e}")
+            logger.error(f"Failed to add documents: {e}")
             raise
-    
-    def add_documents(self, chunks: List[Dict[str, Any]]):
-        """Add documents to vector store"""
-        if not chunks:
-            logger.warning("No chunks to add")
-            return
 
+    def search(self, query: str, top_k: int = 5, relevance_threshold: float = 0.7):
+        """Search for similar documents with relevance scores."""
         try:
-            import faiss
-            import numpy as np
-
-            # Generate embeddings for all chunks
-            texts = [chunk['content'] for chunk in chunks]
-            embeddings = self.embedding_service.get_embeddings(texts)
-
-            # Convert to numpy array
-            embeddings_np = np.array(embeddings, dtype=np.float32)
-
-            # Add to FAISS index
-            self.index.add(embeddings_np)
-
-            # Store documents and metadata
-            for chunk in chunks:
-                self.documents.append(chunk['content'])
-                self.metadata.append(chunk['metadata'])
-
-            # Save index and documents
-            self._save_index()
-
-            logger.info(f"Added {len(chunks)} chunks to vector store")
-
+            results = self.vector_store.similarity_search_with_relevance_scores(query, k=top_k)
+            return [
+                {
+                    "content": result[0].page_content,
+                    "metadata": result[0].metadata,
+                    "relevance_score": result[1]
+                }
+                for result in results if result[1] >= relevance_threshold
+            ]
         except Exception as e:
-            logger.error(f"Error adding documents to vector store: {e}")
-            raise
-    
-    def search(self, query: str, top_k: int = 5, filter_metadata: Optional[Dict] = None) -> List[Dict[str, Any]]:
-        """Search for similar documents"""
-        try:
-            import faiss
-            import numpy as np
-
-            if self.index is None or self.index.ntotal == 0:
-                return []
-
-            # Generate query embedding
-            query_embedding = self.embedding_service.get_embeddings([query])[0]
-            query_embedding_np = np.array([query_embedding], dtype=np.float32)
-
-            # Search FAISS index
-            scores, indices = self.index.search(query_embedding_np, min(top_k, self.index.ntotal))
-
-            # Format results
-            formatted_results = []
-            for score, idx in zip(scores[0], indices[0]):
-                if idx < len(self.documents):  # Valid index
-                    # Apply metadata filter if provided
-                    if filter_metadata:
-                        metadata = self.metadata[idx]
-                        if not all(metadata.get(k) == v for k, v in filter_metadata.items()):
-                            continue
-
-                    formatted_results.append({
-                        'content': self.documents[idx],
-                        'metadata': self.metadata[idx],
-                        'similarity_score': float(score)
-                    })
-
-            return formatted_results
-
-        except Exception as e:
-            logger.error(f"Error searching vector store: {e}")
+            logger.error(f"Search failed: {e}")
             return []
-    
-    def get_collection_info(self) -> Dict[str, Any]:
-        """Get information about the collection"""
-        try:
-            count = self.collection.count()
-            return {
-                'collection_name': self.collection_name,
-                'document_count': count,
-                'status': 'active'
-            }
-        except Exception as e:
-            logger.error(f"Error getting collection info: {e}")
-            return {
-                'collection_name': self.collection_name,
-                'document_count': 0,
-                'status': 'error'
-            }
-    
+
     def clear_collection(self):
-        """Clear all documents from collection"""
+        """Clear all documents from the collection."""
         try:
-            # ChromaDB doesn't have a direct clear method, so we delete and recreate
-            self.client.delete_collection(self.collection_name)
-            self.collection = self._get_or_create_collection()
-            logger.info("Collection cleared successfully")
-            return True
+            # Dummy document to bootstrap FAISS
+            dummy_doc = Document(page_content="init")
+            self.vector_store = FAISS.from_documents([dummy_doc], self.embeddings)
+            # Remove dummy entry
+            self.vector_store.index.reset()
+            self.vector_store.docstore._dict.clear()
+            self.vector_store.save_local(self.index_path)
+            logger.info("Cleared the vector store collection.")
         except Exception as e:
-            logger.error(f"Error clearing collection: {e}")
-            return False
+            logger.error(f"Failed to clear collection: {e}")
+            raise
+
+    def get_collection_info(self):
+        """Get information about the collection."""
+        try:
+            document_count = len(self.vector_store.docstore)
+            return {
+                "collection_name": self.collection_name,
+                "document_count": document_count,
+                "status": "active"
+            }
+        except Exception as e:
+            logger.error(f"Failed to get collection info: {e}")
+            return {
+                "collection_name": self.collection_name,
+                "document_count": 0,
+                "status": "error"
+            }

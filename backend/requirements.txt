@@ -10,18 +10,22 @@ pandas==1.5.3  # Compatible with Python 3.11 and below
 openpyxl==3.1.2
 xlrd==2.0.1
 
-# Vector/Embeddings
+# Vector/Embeddings (using Ollama instead of local models)
 faiss-cpu==1.7.4
-sentence-transformers==2.2.2
-huggingface-hub==0.15.0
-torch==2.1.0+cpu --index-url https://download.pytorch.org/whl/cpu
-
-# SLM
-transformers==4.36.0
-accelerate==0.25.0
+numpy==1.24.3  # Compatible with Python 3.11 and below
 
 # Utilities
 pydantic==2.5.0
 pydantic-settings==2.1.0
 python-dotenv==1.0.0
-numpy==1.24.3  # Compatible with Python 3.11 and below
+
+# Requests for Ollama API integration
+requests==2.31.0
+
+# LangChain dependencies for Ollama integration
+langchain-ollama>=0.1.0
+langchain-community>=0.2.0
+langchain-core>=0.2.0
+langchain-text-splitters>=0.2.0
+
+
