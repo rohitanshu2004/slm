@@ -72,6 +72,22 @@ class CSVProcessor:
 
         return chunks
     
+    def _validate_csv_structure(self, file_path: str, file_name: str) -> bool:
+        """Validate CSV file structure before processing"""
+        try:
+            # Try to read first few rows to check if it's a valid CSV
+            pd.read_csv(file_path, nrows=5)
+            return True
+        except pd.errors.EmptyDataError:
+            logger.error(f"CSV file is empty: {file_name}")
+            return False
+        except pd.errors.ParserError:
+            logger.error(f"CSV file has parsing errors: {file_name}")
+            return False
+        except Exception as e:
+            logger.error(f"CSV validation failed for {file_name}: {str(e)}")
+            return False
+    
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
         """Clean and prepare dataframe"""
         df = df.copy()

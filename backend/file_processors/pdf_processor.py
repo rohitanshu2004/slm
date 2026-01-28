@@ -61,6 +61,28 @@ class PDFProcessor:
 
         return chunks
     
+    def _validate_pdf_structure(self, file_path: str, file_name: str) -> bool:
+        """Validate PDF file structure before processing"""
+        try:
+            # Check PDF signature
+            with open(file_path, 'rb') as file:
+                header = file.read(8)
+                if not header.startswith(b'%PDF'):
+                    logger.error(f"PDF file has invalid signature: {file_name}")
+                    return False
+            
+            # Attempt to open with PyPDF2 to validate internal structure
+            with open(file_path, 'rb') as file:
+                PyPDF2.PdfReader(file)
+            
+            return True
+        except PyPDF2.errors.PdfReadError as e:
+            logger.error(f"PDF validation failed for {file_name}: {str(e)}")
+            return False
+        except Exception as e:
+            logger.error(f"PDF validation failed for {file_name}: {str(e)}")
+            return False
+    
     def _process_with_pdfplumber(self, file_path: str, file_name: str) -> List[Dict]:
         """Process PDF using pdfplumber"""
         chunks = []

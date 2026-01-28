@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 # Configuration
 API_BASE_URL = "http://localhost:8000"
-TIMEOUT = 30
+TIMEOUT = 300  # 5 minutes
 
 st.set_page_config(
     page_title="Financial Document Q&A", 

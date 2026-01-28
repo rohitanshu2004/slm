@@ -1,10 +1,13 @@
 from langchain_community.vectorstores.faiss import FAISS
 from langchain_ollama import OllamaEmbeddings
-from langchain.schema import Document
+from langchain_core.documents import Document
 from typing import Iterable, List
 from config import settings
 from exceptions import VectorStoreException
+import faiss
+from langchain_community.docstore.in_memory import InMemoryDocstore
 import os
+import shutil
 import logging
 
 logger = logging.getLogger(__name__)
@@ -33,23 +36,52 @@ class VectorStore:
         try:
             if os.path.exists(self.index_path):
                 try:
-                    self.vector_store = FAISS.load_local(self.index_path, self.embeddings)
+                    self.vector_store = FAISS.load_local(
+                        self.index_path, 
+                        self.embeddings,
+                        allow_dangerous_deserialization=True
+                    )
+                    logger.debug(f"Loaded FAISS index from {self.index_path}")
+                    logger.debug(f"Index contains {len(self.vector_store.index_to_docstore_id)} documents")
                     logger.info(f"Loaded existing FAISS index for collection: {collection_name}")
                 except Exception as e:
                     logger.exception("Failed to load existing FAISS index, attempting to recreate")
-                    # Try to recreate a fresh index
-                    dummy_doc = Document(page_content="init")
-                    self.vector_store = FAISS.from_documents([dummy_doc], self.embeddings)
-                    self.vector_store.index.reset()
-                    self.vector_store.docstore._dict.clear()
-                    logger.info(f"Recreated FAISS index for collection: {collection_name}")
+                    logger.warning(f"Recreating FAISS index after load failure for {collection_name}")
+                    
+                    # Generate test embedding to detect dimension
+                    test_embedding = self.embeddings.embed_query("test")
+                    dimension = len(test_embedding)
+                    
+                    # Create empty FAISS index
+                    index = faiss.IndexFlatL2(dimension)
+                    
+                    # Create FAISS instance with proper initialization
+                    self.vector_store = FAISS(
+                        embedding_function=self.embeddings.embed_query,
+                        index=index,
+                        docstore=InMemoryDocstore({}),
+                        index_to_docstore_id={}
+                    )
+                    
+                    logger.debug(f"Created empty FAISS index with dimension {dimension}")
+                    logger.info(f"Successfully recreated FAISS index for collection: {collection_name}")
             else:
-                # Dummy document to bootstrap FAISS
-                dummy_doc = Document(page_content="init")
-                self.vector_store = FAISS.from_documents([dummy_doc], self.embeddings)
-                # Remove dummy entry
-                self.vector_store.index.reset()
-                self.vector_store.docstore._dict.clear()
+                # Generate test embedding to detect dimension
+                test_embedding = self.embeddings.embed_query("test")
+                dimension = len(test_embedding)
+                
+                # Create empty FAISS index
+                index = faiss.IndexFlatL2(dimension)
+                
+                # Create FAISS instance with proper initialization
+                self.vector_store = FAISS(
+                    embedding_function=self.embeddings.embed_query,
+                    index=index,
+                    docstore=InMemoryDocstore({}),
+                    index_to_docstore_id={}
+                )
+                
+                logger.debug(f"Created empty FAISS index with dimension {dimension}")
                 logger.info(f"Created new FAISS index for collection: {collection_name}")
         except Exception as e:
             logger.exception("Failed to initialize FAISS vector store")
@@ -78,6 +110,7 @@ class VectorStore:
         docs: List[Document] = list(documents)
         if not docs:
             logger.info("No documents provided to add to the vector store.")
+            logger.debug(f"Skipping add_documents: no documents provided")
             return
 
         # Extract texts and metadatas with validation
@@ -92,6 +125,8 @@ class VectorStore:
         if any(t is None for t in texts):
             logger.error("One or more Document objects are missing `page_content`.")
             raise ValueError("All Document objects must have `page_content` set.")
+        
+        logger.debug(f"Validated {len(docs)} documents for addition")
 
         # Add documents to FAISS with explicit error handling
         try:
@@ -99,6 +134,8 @@ class VectorStore:
                 self.vector_store.add_documents(docs)
             else:
                 self.vector_store.add_texts(texts, metadatas)
+            
+            logger.debug(f"Successfully added {len(docs)} documents to FAISS index")
         except Exception as e:
             logger.exception("Failed while adding documents to FAISS index")
             raise VectorStoreException(
@@ -110,9 +147,11 @@ class VectorStore:
         # Persist the FAISS index to disk
         try:
             self.vector_store.save_local(self.index_path)
+            logger.debug(f"Saved FAISS index to {self.index_path}")
         except Exception as e:
             logger.exception("Failed to save FAISS index after adding documents")
             # Attempt to roll back by clearing collection
+            logger.debug("Attempting rollback: clearing collection")
             try:
                 self.clear_collection()
             except Exception:
@@ -128,8 +167,9 @@ class VectorStore:
     def search(self, query: str, top_k: int = 5, relevance_threshold: float = 0.7):
         """Search for similar documents with relevance scores."""
         try:
+            logger.debug(f"Searching for query with k={top_k}, threshold={relevance_threshold}")
             results = self.vector_store.similarity_search_with_relevance_scores(query, k=top_k)
-            return [
+            filtered_results = [
                 {
                     "content": result[0].page_content,
                     "metadata": result[0].metadata,
@@ -137,21 +177,48 @@ class VectorStore:
                 }
                 for result in results if result[1] >= relevance_threshold
             ]
+            logger.debug(f"Found {len(filtered_results)} results above threshold")
+            return filtered_results
         except Exception as e:
-            logger.error(f"Search failed: {e}")
+            logger.error(f"Search failed: {e}", exc_info=True)
             return []
 
     def clear_collection(self):
         """Clear all documents from the collection."""
         try:
-            dummy_doc = Document(page_content="init")
-            self.vector_store = FAISS.from_documents([dummy_doc], self.embeddings)
-            # Remove dummy entry
-            self.vector_store.index.reset()
-            self.vector_store.docstore._dict.clear()
-            # Persist empty index
+            # Delete the entire FAISS index directory to avoid corruption
+            if os.path.exists(self.index_path):
+                try:
+                    shutil.rmtree(self.index_path)
+                    logger.info(f"Deleted existing FAISS index directory: {self.index_path}")
+                except Exception as e:
+                    logger.warning(f"Failed to delete FAISS directory: {e}")
+            
+            # Recreate directory
+            os.makedirs(self.index_path, exist_ok=True)
+            
+            # Generate test embedding to detect dimension
+            test_embedding = self.embeddings.embed_query("test")
+            dimension = len(test_embedding)
+            
+            # Create empty FAISS index
+            index = faiss.IndexFlatL2(dimension)
+            
+            # Create FAISS instance with proper initialization
+            self.vector_store = FAISS(
+                embedding_function=self.embeddings.embed_query,
+                index=index,
+                docstore=InMemoryDocstore({}),
+                index_to_docstore_id={}
+            )
+            
+            logger.debug(f"Created clean FAISS index with dimension {dimension}")
+            
+            # Save the clean empty index
+            logger.debug(f"Saving clean index to {self.index_path}")
             try:
                 self.vector_store.save_local(self.index_path)
+                logger.info("Created and saved clean FAISS index.")
             except Exception as e:
                 logger.exception("Failed to save FAISS index during clear operation")
                 raise VectorStoreException(
@@ -173,6 +240,7 @@ class VectorStore:
         try:
             # Use index_to_docstore_id mapping to get document count
             document_count = len(self.vector_store.index_to_docstore_id)
+            logger.debug(f"Collection {self.collection_name} has {document_count} documents")
             return {
                 "collection_name": self.collection_name,
                 "document_count": document_count,

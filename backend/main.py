@@ -1027,6 +1027,6 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8001,
-        reload=settings.DEBUG,
-        log_level="info"
+        # reload=settings.DEBUG,
+        # log_level="info"
     )
