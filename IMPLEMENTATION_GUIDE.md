@@ -279,7 +279,7 @@ raise NoDocumentsException()
 #### User-Friendly Error Messages
 ```
 ⏱️ Request timed out. The file might be too large or the server is slow.
-❌ Cannot connect to the API server. Make sure it's running on http://localhost:8000
+❌ Cannot connect to the API server. Make sure it's running on http://localhost:8001
 📤 Please upload documents first using the sidebar to start asking questions.
 ℹ️ No relevant sources found for this query.
 ```

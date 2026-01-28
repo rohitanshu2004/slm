@@ -11,6 +11,8 @@ import asyncio
 from contextlib import asynccontextmanager
 import sys
 import os
+import threading
+from typing import Dict, List, Optional
 
 # Add the parent directory to sys.path to allow absolute imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -59,6 +61,11 @@ _text_chunker = None
 _initialization_lock = asyncio.Lock()
 _is_initializing = False
 _initialization_error = None
+
+# Upload session management
+_upload_sessions = {}
+_active_upload_session = None
+_upload_lock = threading.Lock()
 
 # ============================================================================
 # LAZY INITIALIZATION FUNCTIONS
@@ -338,6 +345,140 @@ def get_text_chunker():
     return _text_chunker
 
 # ============================================================================
+# UPLOAD SESSION MANAGEMENT
+# ============================================================================
+
+def create_upload_session(session_id: str, total_files: int) -> Dict:
+    """Create a new upload session"""
+    global _upload_sessions, _active_upload_session
+
+    with _upload_lock:
+        if _active_upload_session is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "UPLOAD_IN_PROGRESS",
+                    "message": "Another upload is currently in progress",
+                    "active_session": _active_upload_session
+                }
+            )
+
+        session = {
+            "session_id": session_id,
+            "status": "initializing",
+            "total_files": total_files,
+            "processed_files": 0,
+            "failed_files": 0,
+            "current_file": None,
+            "progress": 0.0,
+            "start_time": datetime.now(),
+            "errors": [],
+            "processed_paths": [],
+            "temp_files": []
+        }
+
+        _upload_sessions[session_id] = session
+        _active_upload_session = session_id
+        logger.info(f"Created upload session {session_id} for {total_files} files")
+        return session
+
+def update_upload_progress(session_id: str, current_file: str = None, increment_processed: bool = False,
+                          error: str = None, temp_file: Path = None, processed_path: Path = None):
+    """Update upload session progress"""
+    global _upload_sessions
+
+    with _upload_lock:
+        if session_id not in _upload_sessions:
+            logger.warning(f"Attempted to update non-existent session {session_id}")
+            return
+
+        session = _upload_sessions[session_id]
+
+        if current_file:
+            session["current_file"] = current_file
+
+        if increment_processed:
+            session["processed_files"] += 1
+            session["progress"] = (session["processed_files"] / session["total_files"]) * 100
+
+        if error:
+            session["errors"].append(error)
+            session["failed_files"] += 1
+
+        if temp_file:
+            session["temp_files"].append(temp_file)
+
+        if processed_path:
+            session["processed_paths"].append(processed_path)
+
+def complete_upload_session(session_id: str, success: bool = True):
+    """Complete an upload session"""
+    global _upload_sessions, _active_upload_session
+
+    with _upload_lock:
+        if session_id not in _upload_sessions:
+            logger.warning(f"Attempted to complete non-existent session {session_id}")
+            return
+
+        session = _upload_sessions[session_id]
+        session["status"] = "completed" if success else "failed"
+        session["end_time"] = datetime.now()
+
+        if success:
+            logger.info(f"Upload session {session_id} completed successfully")
+        else:
+            logger.error(f"Upload session {session_id} failed")
+
+        # Clear active session
+        if _active_upload_session == session_id:
+            _active_upload_session = None
+
+def get_upload_progress(session_id: str) -> Optional[Dict]:
+    """Get upload progress for a session"""
+    with _upload_lock:
+        return _upload_sessions.get(session_id)
+
+def cleanup_failed_upload(session_id: str):
+    """Clean up files from a failed upload session"""
+    global _upload_sessions
+
+    with _upload_lock:
+        if session_id not in _upload_sessions:
+            return
+
+        session = _upload_sessions[session_id]
+        logger.info(f"Cleaning up failed upload session {session_id}")
+
+        # Remove temp files
+        for temp_file in session.get("temp_files", []):
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                    logger.info(f"Removed temp file: {temp_file}")
+            except Exception as e:
+                logger.warning(f"Failed to remove temp file {temp_file}: {e}")
+
+        # Remove processed files (rollback)
+        for processed_path in session.get("processed_paths", []):
+            try:
+                if processed_path.exists():
+                    if processed_path.is_file():
+                        processed_path.unlink()
+                    else:
+                        shutil.rmtree(processed_path)
+                    logger.info(f"Removed processed file during rollback: {processed_path}")
+            except Exception as e:
+                logger.warning(f"Failed to remove processed file {processed_path}: {e}")
+
+        # Clear vector store if it was partially populated
+        try:
+            if _vector_store is not None:
+                _vector_store.clear_collection()
+                logger.info("Cleared vector store during upload rollback")
+        except Exception as e:
+            logger.warning(f"Failed to clear vector store during rollback: {e}")
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        
+# ============================================================================
 # FASTAPI LIFESPAN (MINIMAL)
 # ============================================================================
 
@@ -453,11 +594,67 @@ async def get_supported_formats():
 # Upload files endpoint
 @app.post("/upload", response_model=UploadResponse)
 async def upload_files(
-    files: List[UploadFile] = File(..., description="Upload PDF, Excel, or CSV files")
+    files: List[UploadFile] = File(...),
+    clear_before_upload: bool = True
 ):
     """Upload and process multiple files"""
+    logger.info("UPLOAD ENDPOINT ENTERED SUCCESSFULLY")
     start_time = datetime.now()
-    
+
+    logger.info(f"Received files: {files}")
+
+    # Automatic cleanup before processing when requested
+    if clear_before_upload:
+        logger.info("clear_before_upload enabled: performing cleanup before processing new files")
+        # 1) Clear vector store collection (if available)
+        try:
+            try:
+                vector_store = await get_vector_store()
+                try:
+                    logger.info("Clearing vector store collection as requested by uploader")
+                    # clear_collection may raise on failure
+                    vector_store.clear_collection()
+                    logger.info("Vector store cleared successfully")
+                except Exception as e:
+                    logger.warning(f"Failed to clear vector store: {e}")
+            except Exception as e:
+                # If initialization failed, log and continue with directory cleanup
+                logger.warning(f"Could not initialize vector store for clearing: {e}")
+        except Exception:
+            logger.exception("Unexpected error while attempting vector store clear")
+
+        # 2) Clear temporary upload directory
+        try:
+            upload_dir = Path(settings.UPLOAD_DIR)
+            if upload_dir.exists():
+                for item in upload_dir.iterdir():
+                    try:
+                        if item.is_file() or item.is_symlink():
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                    except Exception as e:
+                        logger.warning(f"Failed to remove {item} from upload dir: {e}")
+                logger.info(f"Cleared upload directory: {upload_dir}")
+        except Exception:
+            logger.exception("Failed to clear upload directory")
+
+        # 3) Clear processed directory
+        try:
+            processed_dir = Path(settings.PROCESSED_DIR)
+            if processed_dir.exists():
+                for item in processed_dir.iterdir():
+                    try:
+                        if item.is_file() or item.is_symlink():
+                            item.unlink()
+                        elif item.is_dir():
+                            shutil.rmtree(item)
+                    except Exception as e:
+                        logger.warning(f"Failed to remove {item} from processed dir: {e}")
+                logger.info(f"Cleared processed directory: {processed_dir}")
+        except Exception:
+            logger.exception("Failed to clear processed directory")
+
     try:
         if not files:
             raise ValidationException(
@@ -469,6 +666,7 @@ async def upload_files(
         processed_files = 0
         all_chunks = []
         all_docs = []
+        processed_paths = []  # track files moved to processed dir for rollback
         
         # Get text chunker (doesn't require heavy initialization)
         text_chunker = get_text_chunker()
@@ -480,26 +678,50 @@ async def upload_files(
                 if file_extension not in settings.ALLOWED_EXTENSIONS:
                     logger.warning(f"Skipping unsupported file type: {file.filename}")
                     continue
-                
-                # Validate file size
-                file_size_mb = file.size / (1024 * 1024)
+
+                # Read file content ONCE
+                content = await file.read()
+
+                file_size_mb = len(content) / (1024 * 1024)
                 if file_size_mb > settings.MAX_FILE_SIZE_MB:
                     raise FileProcessingException(
-                        message=f"File size exceeds maximum allowed size",
+                        message="File size exceeds maximum allowed size",
                         filename=file.filename,
                         file_type=file_extension,
-                        details={"max_size_mb": settings.MAX_FILE_SIZE_MB, "actual_size_mb": file_size_mb}
+                        details={
+                            "max_size_mb": settings.MAX_FILE_SIZE_MB,
+                            "actual_size_mb": file_size_mb
+                        }
                     )
-                
+
+                # 🔴 CRITICAL: reset file pointer
+                file.file.seek(0)
+
                 # Create unique filename
                 file_id = str(uuid.uuid4())[:8]
                 safe_filename = f"{file_id}_{file.filename.replace(' ', '_')}"
                 file_path = Path(settings.UPLOAD_DIR) / safe_filename
-                
+
                 # Save file
-                with open(file_path, "wb") as buffer:
-                    content = await file.read()
-                    buffer.write(content)
+                try:
+                    with open(file_path, "wb") as buffer:
+                        if not content:
+                            raise FileProcessingException(
+                                message="Uploaded file is empty",
+                                filename=file.filename,
+                                file_type=file_extension
+                            )
+                        buffer.write(content)
+                except FileProcessingException:
+                    raise
+                except Exception as e:
+                    logger.exception(f"Failed to save uploaded file {file.filename}")
+                    raise FileProcessingException(
+                        message="Failed to save uploaded file",
+                        filename=file.filename,
+                        file_type=file_extension,
+                        details={"error": str(e)}
+                    )
                 
                 logger.info(f"Processing file: {file.filename} as {safe_filename}")
                 
@@ -522,11 +744,11 @@ async def upload_files(
                     )
                 
                 # Apply semantic chunking
-                if text_chunker:
+                if text_chunker is not None:
                     try:
                         chunks = text_chunker.create_semantic_chunks(chunks)
                     except Exception as e:
-                        logger.warning(f"Semantic chunking failed, using original chunks: {e}")
+                        logger.warning(f"Semantic chunking skipped: {e}")
                 
                 # Convert chunks to Document objects
                 for chunk in chunks:
@@ -550,7 +772,23 @@ async def upload_files(
                 # Move to processed directory
                 processed_path = Path(settings.PROCESSED_DIR) / safe_filename
                 processed_path.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(file_path), str(processed_path))
+                try:
+                    shutil.move(str(file_path), str(processed_path))
+                    processed_paths.append(processed_path)
+                except Exception as e:
+                    logger.exception(f"Failed to move processed file {safe_filename} to processed dir")
+                    # Attempt to remove the uploaded file if move failed to avoid leftover
+                    try:
+                        if Path(file_path).exists():
+                            Path(file_path).unlink()
+                    except Exception:
+                        logger.warning(f"Could not remove temporary uploaded file {file_path}")
+                    raise FileProcessingException(
+                        message="Failed to move processed file",
+                        filename=safe_filename,
+                        file_type=file_extension,
+                        details={"error": str(e)}
+                    )
                 
             except FileProcessingException:
                 raise
@@ -575,6 +813,26 @@ async def upload_files(
                 vector_store.add_documents(all_docs)
                 logger.info(f"Added {len(all_docs)} documents to vector store")
             except Exception as e:
+                # Attempt rollback: clear any partial state in vector store and remove processed files
+                logger.error(f"Error adding documents to vector store: {e}", exc_info=True)
+                try:
+                    logger.info("Attempting rollback: clearing vector store")
+                    vector_store.clear_collection()
+                except Exception as ce:
+                    logger.warning(f"Rollback: failed to clear vector store: {ce}")
+
+                # Remove moved processed files to avoid inconsistent state
+                for p in processed_paths:
+                    try:
+                        if p.exists():
+                            if p.is_file():
+                                p.unlink()
+                            else:
+                                shutil.rmtree(p)
+                            logger.info(f"Removed processed file during rollback: {p}")
+                    except Exception as re:
+                        logger.warning(f"Rollback: failed to remove processed file {p}: {re}")
+
                 raise VectorStoreException(
                     message="Failed to add documents to vector store",
                     operation="add_documents",
@@ -595,12 +853,12 @@ async def upload_files(
         logger.error(f"Upload failed: {e}")
         raise HTTPException(status_code=e.status_code, detail=e.to_dict())
     except Exception as e:
-        logger.error(f"Unexpected error during upload: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail={
-            "error": "UPLOAD_ERROR",
-            "message": "Unexpected error during file upload",
-            "details": str(e) if settings.DEBUG else None
-        })
+        import traceback
+        traceback.print_exc()   # 👈 THIS IS CRITICAL
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)        # 👈 SHOW REAL ERROR
+        )
 
 # Query endpoint
 @app.post("/query", response_model=QueryResponse)
@@ -768,7 +1026,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "main:app",
         host="0.0.0.0",
-        port=8000,
+        port=8001,
         reload=settings.DEBUG,
         log_level="info"
     )

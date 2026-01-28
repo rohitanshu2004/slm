@@ -7,6 +7,7 @@ import logging
 from config import settings
 
 logger = logging.getLogger(__name__)
+from exceptions import FileProcessingException
 
 class ExcelProcessor:
     def __init__(self, max_rows_per_chunk: int = 50):
@@ -16,23 +17,44 @@ class ExcelProcessor:
         """Process Excel file with multiple sheets"""
         chunks = []
         file_name = Path(file_path).name
-        
+        # Validate file
+        p = Path(file_path)
+        if not p.exists() or p.stat().st_size == 0:
+            logger.error(f"Excel file missing or empty: {file_path}")
+            raise FileProcessingException(
+                message="Excel file is missing or empty",
+                filename=file_name,
+                file_type='excel'
+            )
+
         try:
             # Try reading as Excel
-            xls = pd.ExcelFile(file_path)
-            sheet_names = xls.sheet_names
-            
+            try:
+                xls = pd.ExcelFile(file_path)
+                sheet_names = xls.sheet_names
+            except Exception as e:
+                logger.exception("Failed to open Excel file")
+                raise FileProcessingException(
+                    message="Failed to read Excel file",
+                    filename=file_name,
+                    file_type='excel',
+                    details={"error": str(e)}
+                )
+
             for sheet_name in sheet_names:
                 try:
                     # Read sheet
                     df = pd.read_excel(xls, sheet_name=sheet_name)
-                    
+
                     # Process the sheet
                     sheet_chunks = self._process_sheet(df, sheet_name, file_name)
                     chunks.extend(sheet_chunks)
-                    
+
+                except FileProcessingException:
+                    # Sheet-level processing raised a structured error; re-raise
+                    raise
                 except Exception as e:
-                    logger.error(f"Error processing sheet {sheet_name}: {e}")
+                    logger.exception(f"Error processing sheet {sheet_name}")
                     # Create a simple chunk with error info
                     chunks.append({
                         'content': f"Sheet: {sheet_name}\nError: Could not process this sheet.",
@@ -45,11 +67,26 @@ class ExcelProcessor:
                             'error': str(e)
                         }
                     })
-        
+
+        except FileProcessingException:
+            raise
         except Exception as e:
-            logger.error(f"Error reading Excel file: {e}")
-            raise Exception(f"Failed to process Excel file: {e}")
-        
+            logger.exception(f"Unexpected error processing Excel file {file_name}")
+            raise FileProcessingException(
+                message="Failed to process Excel file",
+                filename=file_name,
+                file_type='excel',
+                details={"error": str(e)}
+            )
+
+        if not chunks:
+            logger.error(f"No usable data extracted from Excel file: {file_name}")
+            raise FileProcessingException(
+                message="Excel file contains no usable data",
+                filename=file_name,
+                file_type='excel'
+            )
+
         return chunks
     
     def _process_sheet(self, df: pd.DataFrame, sheet_name: str, file_name: str) -> List[Dict]:
@@ -145,14 +182,47 @@ class ExcelProcessor:
         """Create descriptive header for the sheet"""
         header = f"Excel Sheet: {sheet_name}\n"
         header += f"Dimensions: {len(df)} rows × {len(df.columns)} columns\n"
-        
+
         if len(df.columns) <= 10:  # Only show columns if not too many
             header += f"Columns: {', '.join(df.columns)}\n"
         else:
             header += f"Columns: {len(df.columns)} columns (too many to list)\n"
-        
+
         # Add sample data if available
         if len(df) > 0:
             header += f"First few rows show: {df.iloc[0, 0][:50]}...\n"
-        
+
         return header
+
+    def _validate_excel_structure(self, file_path: str, file_name: str) -> bool:
+        """Validate Excel file structure before processing"""
+        try:
+            # Check file header to ensure it's an Excel file
+            with open(file_path, 'rb') as f:
+                header = f.read(8)
+
+            # Excel files start with specific signatures
+            excel_signatures = [
+                b'\x50\x4B\x03\x04',  # ZIP/XLSX signature
+                b'\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1',  # XLS signature (OLE2)
+            ]
+
+            if not any(header.startswith(sig) for sig in excel_signatures):
+                logger.error(f"File {file_name} does not have valid Excel signature")
+                return False
+
+            # Try to open with pandas to validate structure
+            try:
+                xls = pd.ExcelFile(file_path)
+                if not xls.sheet_names:
+                    logger.error(f"Excel file {file_name} has no sheets")
+                    return False
+            except Exception as e:
+                logger.error(f"Failed to validate Excel structure for {file_name}: {e}")
+                return False
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Error validating Excel file {file_name}: {e}")
+            return False

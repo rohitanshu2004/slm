@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 import logging
 from config import settings
+from exceptions import FileProcessingException
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,24 @@ class PDFProcessor:
         """Process PDF file and extract text with metadata"""
         chunks = []
         file_name = Path(file_path).name
-        
+        # Enhanced validation: file exists, not empty, and valid PDF
+        p = Path(file_path)
+        if not p.exists() or p.stat().st_size == 0:
+            logger.error(f"PDF file missing or empty: {file_path}")
+            raise FileProcessingException(
+                message="PDF file is missing or empty",
+                filename=file_name,
+                file_type='pdf'
+            )
+
+        # Validate PDF structure before processing
+        if not self._validate_pdf_structure(file_path, file_name):
+            raise FileProcessingException(
+                message="PDF file is corrupted or has invalid structure",
+                filename=file_name,
+                file_type='pdf'
+            )
+
         try:
             # Try using pdfplumber first (better for text extraction)
             chunks.extend(self._process_with_pdfplumber(file_path, file_name))
@@ -26,8 +44,21 @@ class PDFProcessor:
                 chunks.extend(self._process_with_pypdf2(file_path, file_name))
             except Exception as e2:
                 logger.error(f"Both PDF processors failed: {e2}")
-                raise Exception(f"Failed to process PDF: {e2}")
-        
+                raise FileProcessingException(
+                    message="Failed to process PDF with available parsers",
+                    filename=file_name,
+                    file_type='pdf',
+                    details={"error": str(e2)}
+                )
+
+        if not chunks:
+            logger.error(f"No text could be extracted from PDF: {file_name}")
+            raise FileProcessingException(
+                message="No extractable text found in PDF file",
+                filename=file_name,
+                file_type='pdf'
+            )
+
         return chunks
     
     def _process_with_pdfplumber(self, file_path: str, file_name: str) -> List[Dict]:

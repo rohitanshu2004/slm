@@ -63,7 +63,7 @@ def handle_api_error(error: Dict[str, Any], context: str = "Operation") -> None:
     error_code = error.get("error", "UNKNOWN_ERROR")
     message = error.get("message", "An unexpected error occurred")
     details = error.get("details")
-    
+            
     error_text = f"**{context} Failed** ({error_code})\n\n{message}"
     if details and isinstance(details, str):
         error_text += f"\n\nDetails: {details}"
@@ -89,47 +89,98 @@ def get_supported_formats() -> Optional[Dict[str, Any]]:
     return None
 
 
-def upload_files(files) -> bool:
-    """Upload files to API"""
+def upload_files(files, clear_before_upload: bool = True) -> bool:
+    """Upload files to API with progress tracking and duplicate prevention"""
     try:
         if not files:
             st.error("Please select at least one file to upload")
             return False
-        
-        files_to_upload = [("files", file) for file in files]
-        
-        with st.spinner("Uploading and processing documents..."):
-            response = requests.post(
-                f"{API_BASE_URL}/upload",
-                files=files_to_upload,
-                timeout=60  # Longer timeout for file processing
-            )
-        
-        if response.status_code == 200:
-            data = response.json()
-            st.success(f"✅ {data.get('message', 'Files processed successfully!')}")
-            st.info(
-                f"📊 **Processing Summary**\n\n"
-                f"- Files processed: {data.get('files_processed', 0)}\n"
-                f"- Chunks created: {data.get('chunks_created', 0)}\n"
-                f"- Processing time: {data.get('processing_time', 0):.2f}s"
-            )
-            logger.info(f"Successfully processed {data.get('files_processed')} files")
-            return True
-        else:
-            error_data = response.json()
-            handle_api_error(error_data, "File Upload")
+
+        # Check if upload is already in progress
+        if st.session_state.get('upload_in_progress', False):
+            st.warning("⚠️ An upload is already in progress. Please wait for it to complete.")
             return False
-            
-    except requests.exceptions.Timeout:
-        st.error("⏱️ Request timed out. The file might be too large or the server is slow.")
-        logger.error("File upload timeout")
-        return False
-    except requests.exceptions.ConnectionError:
-        st.error("❌ Cannot connect to the API server. Make sure it's running on http://localhost:8000")
-        logger.error("API connection error during upload")
-        return False
+
+        # Set upload in progress flag
+        st.session_state.upload_in_progress = True
+
+        files_to_upload = [
+    (
+        "files",
+        (
+            file.name,
+            file.getvalue(),   # <-- BYTES (critical)
+            file.type          # <-- MIME type
+        )
+    )
+    for file in files
+]
+
+
+        # Create progress bar and status containers
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        status_text.text("Initializing upload...")
+
+        try:
+            url = f"{API_BASE_URL}/upload?clear_before_upload={str(clear_before_upload).lower()}"
+            response = requests.post(
+                url,
+                files=files_to_upload,
+                timeout=300  # 5 minute timeout for large uploads
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                progress_bar.progress(100)
+                status_text.text("✅ Upload completed successfully!")
+
+                st.success(f"✅ {data.get('message', 'Files processed successfully!')}")
+                st.info(
+                    f"📊 **Processing Summary**\n\n"
+                    f"- Files processed: {data.get('files_processed', 0)}\n"
+                    f"- Chunks created: {data.get('chunks_created', 0)}\n"
+                    f"- Processing time: {data.get('processing_time', 0):.2f}s"
+                )
+                logger.info(f"Successfully processed {data.get('files_processed')} files")
+                return True
+            elif response.status_code == 409:
+                # Upload already in progress
+                error_data = response.json()
+                st.warning(f"⚠️ {error_data.get('message', 'Another upload is already in progress')}")
+                return False
+            else:
+                error_data = response.json()
+                progress_bar.progress(100)
+                status_text.text("❌ Upload failed")
+                handle_api_error(error_data, "File Upload")
+                return False
+
+        except requests.exceptions.Timeout:
+            progress_bar.progress(100)
+            status_text.text("❌ Upload timed out")
+            st.error("⏱️ Request timed out. The files might be too large or the server is overloaded.")
+            logger.error("File upload timeout")
+            return False
+        except requests.exceptions.ConnectionError:
+            progress_bar.progress(100)
+            status_text.text("❌ Connection failed")
+            st.error("❌ Cannot connect to the API server. Make sure it's running on http://localhost:8000")
+            logger.error("API connection error during upload")
+            return False
+        except Exception as e:
+            progress_bar.progress(100)
+            status_text.text("❌ Upload failed")
+            st.error(f"❌ Unexpected error during upload: {str(e)}")
+            logger.error(f"Unexpected upload error: {e}", exc_info=True)
+            return False
+        finally:
+            # Clear upload in progress flag
+            st.session_state.upload_in_progress = False
+
     except Exception as e:
+        # Clear upload in progress flag even if outer try fails
+        st.session_state.upload_in_progress = False
         st.error(f"❌ Unexpected error during upload: {str(e)}")
         logger.error(f"Unexpected upload error: {e}", exc_info=True)
         return False
@@ -222,13 +273,16 @@ with st.sidebar:
         help="You can select multiple files at once"
     )
     
+    # Option to clear previous data before uploading
+    clear_previous_data = st.checkbox("Clear previous data", value=True, help="Clear vector DB and temporary files before uploading new documents")
+
     if uploaded_files:
         st.write(f"**Selected files:** {len(uploaded_files)}")
         for file in uploaded_files:
             st.write(f"- {file.name} ({file.size / 1024:.1f} KB)")
         
         if st.button("🚀 Process Documents", use_container_width=True):
-            success = upload_files(uploaded_files)
+            success = upload_files(uploaded_files, clear_before_upload=clear_previous_data)
             if success:
                 st.session_state.documents_processed = True
     

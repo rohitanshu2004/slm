@@ -4,6 +4,7 @@ from pathlib import Path
 import logging
 
 from config import settings
+from exceptions import FileProcessingException
 
 logger = logging.getLogger(__name__)
 
@@ -15,7 +16,24 @@ class CSVProcessor:
         """Process CSV file"""
         chunks = []
         file_name = Path(file_path).name
-        
+        # Enhanced validation: file exists, not empty, and valid CSV
+        p = Path(file_path)
+        if not p.exists() or p.stat().st_size == 0:
+            logger.error(f"CSV file missing or empty: {file_path}")
+            raise FileProcessingException(
+                message="CSV file is missing or empty",
+                filename=file_name,
+                file_type='csv'
+            )
+
+        # Validate CSV structure before processing
+        if not self._validate_csv_structure(file_path, file_name):
+            raise FileProcessingException(
+                message="CSV file is malformed or corrupted",
+                filename=file_name,
+                file_type='csv'
+            )
+
         try:
             # Read CSV with flexible options
             try:
@@ -23,19 +41,35 @@ class CSVProcessor:
             except UnicodeDecodeError:
                 try:
                     df = pd.read_csv(file_path, encoding='latin-1')
-                except:
+                except Exception:
                     df = pd.read_csv(file_path, encoding='utf-8', errors='ignore')
-            
+
             # Clean dataframe
             df = self._clean_dataframe(df)
-            
+
+            # Validate dataframe content
+            if df is None or df.shape[0] == 0:
+                logger.error(f"CSV appears empty after reading/cleaning: {file_name}")
+                raise FileProcessingException(
+                    message="CSV file contains no usable data",
+                    filename=file_name,
+                    file_type='csv'
+                )
+
             # Process dataframe into chunks
             chunks = self._process_dataframe(df, file_name)
-            
+
+        except FileProcessingException:
+            raise
         except Exception as e:
-            logger.error(f"Error processing CSV file {file_name}: {e}")
-            raise Exception(f"Failed to process CSV file: {e}")
-        
+            logger.exception(f"Error processing CSV file {file_name}")
+            raise FileProcessingException(
+                message="Failed to process CSV file",
+                filename=file_name,
+                file_type='csv',
+                details={"error": str(e)}
+            )
+
         return chunks
     
     def _clean_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
