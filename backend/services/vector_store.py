@@ -1,14 +1,13 @@
-from langchain_community.vectorstores.faiss import FAISS
+from langchain_community.vectorstores import Chroma
 from langchain_ollama import OllamaEmbeddings
 from langchain_core.documents import Document
 from typing import Iterable, List
 from config import settings
 from exceptions import VectorStoreException
-import faiss
-from langchain_community.docstore.in_memory import InMemoryDocstore
 import os
 import shutil
 import logging
+import chromadb
 
 logger = logging.getLogger(__name__)
 
@@ -32,62 +31,43 @@ class VectorStore:
                 details={"error": str(e)}
             )
 
-        # Load or create FAISS index
+        # Load or create ChromaDB collection
         try:
             if os.path.exists(self.index_path):
                 try:
-                    self.vector_store = FAISS.load_local(
-                        self.index_path, 
-                        self.embeddings,
-                        allow_dangerous_deserialization=True
+                    self.vector_store = Chroma(
+                        collection_name=collection_name,
+                        embedding_function=self.embeddings,
+                        persist_directory=persist_directory
                     )
-                    logger.debug(f"Loaded FAISS index from {self.index_path}")
-                    logger.debug(f"Index contains {len(self.vector_store.index_to_docstore_id)} documents")
-                    logger.info(f"Loaded existing FAISS index for collection: {collection_name}")
+                    logger.debug(f"Loaded ChromaDB collection from {self.index_path}")
+                    logger.info(f"Loaded existing ChromaDB collection: {collection_name}")
                 except Exception as e:
-                    logger.exception("Failed to load existing FAISS index, attempting to recreate")
-                    logger.warning(f"Recreating FAISS index after load failure for {collection_name}")
-                    
-                    # Generate test embedding to detect dimension
-                    test_embedding = self.embeddings.embed_query("test")
-                    dimension = len(test_embedding)
-                    
-                    # Create empty FAISS index
-                    index = faiss.IndexFlatL2(dimension)
-                    
-                    # Create FAISS instance with proper initialization
-                    self.vector_store = FAISS(
-                        embedding_function=self.embeddings.embed_query,
-                        index=index,
-                        docstore=InMemoryDocstore({}),
-                        index_to_docstore_id={}
+                    logger.exception("Failed to load existing ChromaDB collection, attempting to recreate")
+                    logger.warning(f"Recreating ChromaDB collection after load failure for {collection_name}")
+
+                    # Create new empty ChromaDB collection
+                    self.vector_store = Chroma(
+                        collection_name=collection_name,
+                        embedding_function=self.embeddings,
+                        persist_directory=persist_directory
                     )
-                    
-                    logger.debug(f"Created empty FAISS index with dimension {dimension}")
-                    logger.info(f"Successfully recreated FAISS index for collection: {collection_name}")
+
+                    logger.info(f"Successfully recreated ChromaDB collection: {collection_name}")
             else:
-                # Generate test embedding to detect dimension
-                test_embedding = self.embeddings.embed_query("test")
-                dimension = len(test_embedding)
-                
-                # Create empty FAISS index
-                index = faiss.IndexFlatL2(dimension)
-                
-                # Create FAISS instance with proper initialization
-                self.vector_store = FAISS(
-                    embedding_function=self.embeddings.embed_query,
-                    index=index,
-                    docstore=InMemoryDocstore({}),
-                    index_to_docstore_id={}
+                # Create new ChromaDB collection
+                self.vector_store = Chroma(
+                    collection_name=collection_name,
+                    embedding_function=self.embeddings,
+                    persist_directory=persist_directory
                 )
-                
-                logger.debug(f"Created empty FAISS index with dimension {dimension}")
-                logger.info(f"Created new FAISS index for collection: {collection_name}")
+
+                logger.info(f"Created new ChromaDB collection: {collection_name}")
         except Exception as e:
-            logger.exception("Failed to initialize FAISS vector store")
+            logger.exception("Failed to initialize ChromaDB vector store")
             raise VectorStoreException(
-                message="Failed to initialize FAISS vector store",
-                operation="init_faiss",
+                message="Failed to initialize ChromaDB vector store",
+                operation="init_chromadb",
                 details={"error": str(e)}
             )
 
@@ -99,18 +79,17 @@ class VectorStore:
             search_kwargs=search_kwargs or {"k": 4}
         )
 
-
     def add_documents(self, documents: Iterable[Document]):
         """Add LangChain `Document` objects to the vector store.
 
         This method accepts an iterable of LangChain `Document` objects, extracts
-        `page_content` and `metadata` from each, adds them to the FAISS index,
-        and ensures the index is persisted to disk.
+        `page_content` and `metadata` from each, adds them to the ChromaDB collection,
+        and ensures the collection is persisted to disk.
         """
         docs: List[Document] = list(documents)
         if not docs:
             logger.info("No documents provided to add to the vector store.")
-            logger.debug(f"Skipping add_documents: no documents provided")
+            logger.debug("Skipping add_documents: no documents provided")
             return
 
         # Extract texts and metadatas with validation
@@ -125,44 +104,34 @@ class VectorStore:
         if any(t is None for t in texts):
             logger.error("One or more Document objects are missing `page_content`.")
             raise ValueError("All Document objects must have `page_content` set.")
-        
+
         logger.debug(f"Validated {len(docs)} documents for addition")
 
-        # Add documents to FAISS with explicit error handling
+        # Add documents to ChromaDB with explicit error handling
         try:
-            if hasattr(self.vector_store, "add_documents"):
-                self.vector_store.add_documents(docs)
-            else:
-                self.vector_store.add_texts(texts, metadatas)
-            
-            logger.debug(f"Successfully added {len(docs)} documents to FAISS index")
+            self.vector_store.add_texts(texts, metadatas)
+            logger.debug(f"Successfully added {len(docs)} documents to ChromaDB collection")
         except Exception as e:
-            logger.exception("Failed while adding documents to FAISS index")
+            logger.exception("Failed while adding documents to ChromaDB collection")
             raise VectorStoreException(
-                message="Failed to add documents to FAISS index",
+                message="Failed to add documents to ChromaDB collection",
                 operation="add_documents",
                 details={"error": str(e), "document_count": len(docs)}
             )
 
-        # Persist the FAISS index to disk
+        # Persist the ChromaDB collection to disk
         try:
-            self.vector_store.save_local(self.index_path)
-            logger.debug(f"Saved FAISS index to {self.index_path}")
+            self.vector_store.persist()
+            logger.debug(f"Persisted ChromaDB collection to {self.persist_directory}")
         except Exception as e:
-            logger.exception("Failed to save FAISS index after adding documents")
-            # Attempt to roll back by clearing collection
-            logger.debug("Attempting rollback: clearing collection")
-            try:
-                self.clear_collection()
-            except Exception:
-                logger.warning("Rollback: clearing FAISS index after failed save also failed")
+            logger.exception("Failed to persist ChromaDB collection after adding documents")
             raise VectorStoreException(
-                message="Failed to save FAISS index after adding documents",
-                operation="save_local",
+                message="Failed to persist ChromaDB collection after adding documents",
+                operation="persist",
                 details={"error": str(e)}
             )
 
-        logger.info(f"Added {len(docs)} documents to the vector store at {self.index_path}.")
+        logger.info(f"Added {len(docs)} documents to the vector store at {self.persist_directory}.")
 
     def search(self, query: str, top_k: int = 5, relevance_threshold: float = 0.7):
         """Search for similar documents with relevance scores."""
@@ -186,60 +155,50 @@ class VectorStore:
     def clear_collection(self):
         """Clear all documents from the collection."""
         try:
-            # Delete the entire FAISS index directory to avoid corruption
-            if os.path.exists(self.index_path):
-                try:
-                    shutil.rmtree(self.index_path)
-                    logger.info(f"Deleted existing FAISS index directory: {self.index_path}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete FAISS directory: {e}")
-            
-            # Recreate directory
-            os.makedirs(self.index_path, exist_ok=True)
-            
-            # Generate test embedding to detect dimension
-            test_embedding = self.embeddings.embed_query("test")
-            dimension = len(test_embedding)
-            
-            # Create empty FAISS index
-            index = faiss.IndexFlatL2(dimension)
-            
-            # Create FAISS instance with proper initialization
-            self.vector_store = FAISS(
-                embedding_function=self.embeddings.embed_query,
-                index=index,
-                docstore=InMemoryDocstore({}),
-                index_to_docstore_id={}
-            )
-            
-            logger.debug(f"Created clean FAISS index with dimension {dimension}")
-            
-            # Save the clean empty index
-            logger.debug(f"Saving clean index to {self.index_path}")
+            # Try to delete all documents from the collection
             try:
-                self.vector_store.save_local(self.index_path)
-                logger.info("Created and saved clean FAISS index.")
+                collection = self.vector_store._collection
+                # Get all document IDs
+                all_ids = collection.get()['ids']
+                if all_ids:
+                    # Delete all documents
+                    collection.delete(ids=all_ids)
+                    logger.info(f"Deleted {len(all_ids)} documents from ChromaDB collection: {self.collection_name}")
+                else:
+                    logger.info(f"Collection {self.collection_name} was already empty")
             except Exception as e:
-                logger.exception("Failed to save FAISS index during clear operation")
-                raise VectorStoreException(
-                    message="Failed to save FAISS index during clear",
-                    operation="clear_collection",
-                    details={"error": str(e)}
-                )
+                logger.warning(f"Failed to clear documents from collection: {e}")
+                # Fallback: try to recreate the collection
+                try:
+                    client = chromadb.PersistentClient(path=self.persist_directory)
+                    client.delete_collection(self.collection_name)
+                    logger.info(f"Deleted ChromaDB collection: {self.collection_name}")
+
+                    # Recreate the collection
+                    self.vector_store = Chroma(
+                        collection_name=self.collection_name,
+                        embedding_function=self.embeddings,
+                        persist_directory=self.persist_directory
+                    )
+                    logger.info(f"Recreated empty ChromaDB collection: {self.collection_name}")
+                except Exception as recreate_e:
+                    logger.error(f"Failed to recreate collection: {recreate_e}")
+                    return False
 
             logger.info("Cleared the vector store collection.")
             return True
         except VectorStoreException:
             raise
         except Exception as e:
-            logger.exception("Unexpected error while clearing FAISS collection")
+            logger.exception("Unexpected error while clearing ChromaDB collection")
             return False
 
     def get_collection_info(self):
         """Get information about the collection."""
         try:
-            # Use index_to_docstore_id mapping to get document count
-            document_count = len(self.vector_store.index_to_docstore_id)
+            # Get document count from ChromaDB
+            collection = self.vector_store._collection
+            document_count = collection.count()
             logger.debug(f"Collection {self.collection_name} has {document_count} documents")
             return {
                 "collection_name": self.collection_name,

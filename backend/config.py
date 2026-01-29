@@ -20,7 +20,7 @@ class Settings:
 
     # Model settings (Ollama model names)
     EMBEDDING_MODEL: str = "nomic-embed-text"  # Ollama embedding model
-    SLM_MODEL: str = "llama2:7b"  # Ollama text generation model
+    SLM_MODEL: str = "qwen2.5:3b"  # Ollama text generation model
 
     # Vector store settings
     VECTOR_DB_PATH: str = "data/vector_db"
